@@ -1,144 +1,263 @@
-"""
-Filename: MetaGPT/examples/build_customized_multi_agents.py
-Created Date: Wednesday, November 15th 2023, 7:12:39 pm
-Author: garylin2099
-"""
+import argparse
+import json
+import os
+from pathlib import Path
+from tqdm import tqdm
 import re
-
-import fire
+import rich
+from rich.syntax import Syntax
+from rich.console import Console
+from rich.panel import Panel
 
 from metagpt.actions import Action, UserRequirement
-from metagpt.logs import logger
 from metagpt.roles import Role
-from metagpt.schema import Message
 from metagpt.team import Team
+from metagpt.logs import logger
+from human_eval.evaluation import evaluate_functional_correctness
 
+data_abs_dir = Path(__file__).parent / "data"
+console = Console()
 
-def parse_code(rsp):
-    pattern = r"```python(.*)```"
-    match = re.search(pattern, rsp, re.DOTALL)
-    code_text = match.group(1) if match else rsp
-    return code_text
+class CodeCompletionAction(Action):
+    PROMPT_TEMPLATE: str = '''
+    **Role**: You are a software programmer.
 
+    **Task**: As a programmer, you are required to complete the function. Use a Chain-of-Thought approach to break down the problem, create pseudocode, and then write the code in Python language.
 
-class SimpleWriteCode(Action):
-    PROMPT_TEMPLATE: str = """
-    Write a python function that can {instruction}.
-    Return ```python your_code_here ``` with NO other texts,
-    your code:
-    """
-    name: str = "SimpleWriteCode"
+    **Instructions**: 
+    1. **Understand and Clarify**: Make sure you understand the task. 
+    2. **Algorithm/Method Selection**: Decide on the most efficient way. 
+    3. **Pseudocode Creation**: Write down the steps you will follow in pseudocode. 
+    4. **Code Generation**: Translate your pseudocode into executable Python code.
+    NOTE: Generate usable code by this Chain-of-Thought approach without summarizing or providing test cases.
 
-    async def run(self, instruction: str):
-        prompt = self.PROMPT_TEMPLATE.format(instruction=instruction)
+    **Code Formatting**: Please write code in 
+    ```python
+    {prompt}
+    ```
+    '''
+    name: str = "CodeCompletionAction"
+    
+    async def run(self, prompt: str):
+        rsp = await self._aask(self.PROMPT_TEMPLATE.format(prompt=prompt))
+        return rsp
 
-        rsp = await self._aask(prompt)
+class TestGenerationAction(Action):
+    PROMPT_TEMPLATE: str = '''
+    **Role**: As a tester, your task is to create basic test cases for the incomplete function.
 
-        code_text = parse_code(rsp)
+    **Instructions**: 
+    1. Create 2-3 basic test cases that verify the core functionality.
+    2. Include at least one edge case test.
+    3. Keep the test cases simple and focused.
+    NOTE: Generate only the test code section, without creating the specific functions or providing a summary.
 
-        return code_text
+    - The format of test cases should be:
+    ```python
+    assert function_name(input) == expected_output, "Test Case Description"
+    ```
 
+    Code to test:
+    ```python
+    {code}
+    ```
+    '''
+    name: str = "TestGenerationAction"
+    
+    async def run(self, code: str):
+        rsp = await self._aask(self.PROMPT_TEMPLATE.format(code=code))
+        return rsp
 
-class SimpleCoder(Role):
-    name: str = "Alice"
-    profile: str = "SimpleCoder"
+class CodeReviewerAction(Action):
+    PROMPT_TEMPLATE: str = '''
+    **Role**: You are a Development Engineer or QA engineer.
 
+    **Task**: Review the code and tests, identify potential issues, and suggest improvements.
+
+    CODE:
+    ```python
+    {code}
+    ```
+    TESTS:
+    ```python
+    {tests}
+    ```
+    '''
+    name: str = "CodeReviewerAction"
+    
+    async def run(self, code: str, tests: str = ""):
+        if tests:
+            return await self._aask(self.PROMPT_TEMPLATE.format(code=code, tests=tests))
+        else:
+            # 如果没有测试用例，只审查代码
+            return await self._aask(f"Review this code:\nCODE:\n```python\n{code}\n```")
+
+class Coder(Role):
+    name: str = "Coder"
+    profile: str = "Coder"
+    
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._watch([UserRequirement])
-        self.set_actions([SimpleWriteCode])
+        self.set_actions([CodeCompletionAction])
 
-
-class SimpleWriteTest(Action):
-    PROMPT_TEMPLATE: str = """
-    Context: {context}
-    Write {k} unit tests using pytest for the given function, assuming you have imported it.
-    Return ```python your_code_here ``` with NO other texts,
-    your code:
-    """
-
-    name: str = "SimpleWriteTest"
-
-    async def run(self, context: str, k: int = 3):
-        prompt = self.PROMPT_TEMPLATE.format(context=context, k=k)
-
-        rsp = await self._aask(prompt)
-
-        code_text = parse_code(rsp)
-
-        return code_text
-
-
-class SimpleTester(Role):
-    name: str = "Bob"
-    profile: str = "SimpleTester"
-
+class Tester(Role):
+    name: str = "Tester"
+    profile: str = "Tester"
+    
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.set_actions([SimpleWriteTest])
-        # self._watch([SimpleWriteCode])
-        self._watch([SimpleWriteCode, SimpleWriteReview])  # feel free to try this too
+        self.set_actions([TestGenerationAction])
+        self._watch([CodeCompletionAction])
 
-    async def _act(self) -> Message:
-        logger.info(f"{self._setting}: to do {self.rc.todo}({self.rc.todo.name})")
-        todo = self.rc.todo
-
-        # context = self.get_memories(k=1)[0].content # use the most recent memory as context
-        context = self.get_memories()  # use all memories as context
-
-        code_text = await todo.run(context, k=5)  # specify arguments
-        msg = Message(content=code_text, role=self.profile, cause_by=type(todo))
-
-        return msg
-
-
-class SimpleWriteReview(Action):
-    PROMPT_TEMPLATE: str = """
-    Context: {context}
-    Review the test cases and provide one critical comments:
-    """
-
-    name: str = "SimpleWriteReview"
-
-    async def run(self, context: str):
-        prompt = self.PROMPT_TEMPLATE.format(context=context)
-
-        rsp = await self._aask(prompt)
-
-        return rsp
-
-
-class SimpleReviewer(Role):
-    name: str = "Charlie"
-    profile: str = "SimpleReviewer"
-
+class Reviewer(Role):
+    name: str = "Reviewer"
+    profile: str = "Reviewer"
+    
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.set_actions([SimpleWriteReview])
-        self._watch([SimpleWriteTest])
+        self.set_actions([CodeReviewerAction])
+        self._watch([TestGenerationAction])
 
+def extract_code_from_message(message):
+    pattern = r"```python\n(.+?)\n```"
+    match = re.search(pattern, message, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return message
 
-async def main(
-    idea: str = "write a function that calculates the product of a list",
-    investment: float = 3.0,
-    n_round: int = 5,
-    add_human: bool = False,
-):
-    logger.info(idea)
+def process_example(example, lang, code_output):
+    # 提取生成的代码
+    generated_code = extract_code_from_message(code_output)
+    # 合并原始prompt和生成的代码
+    example['output'] = generated_code
+    return {
+        'task_id': example['task_id'],
+        'completion': example['prompt'] + '\n' + generated_code
+    }
 
+def display_evaluation_info(example, code_output, result=None):
+    # 显示任务要求
+    console.print(Panel(example['prompt'], title="[bold blue]Task Requirement", border_style="blue"))
+    
+    # 显示生成的代码（带语法高亮）
+    generated_code = extract_code_from_message(code_output)
+    syntax = Syntax(generated_code, "python", theme="monokai", line_numbers=True)
+    console.print(Panel(syntax, title="[bold green]Generated Code", border_style="green"))
+    
+    # 如果有评测结果，显示评测结果
+    if result:
+        console.print(Panel(str(result), title="[bold yellow]Evaluation Result", border_style="yellow"))
+
+async def generate_main(args):
+    
+    lang = args.language
+    saved_path = args.output_path
+    # 确保output目录存在
+    os.makedirs(os.path.dirname(saved_path), exist_ok=True)
+    problem_file = str(data_abs_dir / f"humaneval-{lang}.jsonl") # 需要加一个str才行
+
+    examples = [json.loads(x) for x in open(problem_file) if x.strip()]
+    
     team = Team()
-    team.hire(
-        [
-            SimpleCoder(),
-            SimpleTester(),
-            SimpleReviewer(is_human=add_human),
-        ]
+    team.hire([Coder(), Tester(), Reviewer()])
+    team.invest(investment=3.0)
+
+    # 初始化已生成的示例列表
+    generated_examples = []
+    last_task_id = None
+
+    # 尝试加载已有的生成结果
+    try:
+        with open(saved_path, 'r') as fr:
+            for line in fr:
+                generated_examples.append(json.loads(line))
+            if generated_examples:
+                last_task_id = int(generated_examples[-1]['task_id'].split('/')[1])
+                print(f"Resuming from task_id: {last_task_id}")
+    except FileNotFoundError:
+        pass
+
+    for i, ex in enumerate(tqdm(examples)):
+        task_id = int(ex['task_id'].split('/')[1])
+        
+        # 跳过已处理的示例
+        if last_task_id and task_id <= last_task_id:
+            continue
+
+        try:
+            # 运行MetaGPT多轮协作流程
+            team.run_project(ex['prompt'])
+            messages = await team.run(n_round=3)
+            # 输出所有消息内容
+
+            # 直接打印消息内容进行调试
+            print(f"\nReceived messages type: {type(messages)}")
+            print(f"Messages content: {messages}")
+            # 获取Coder生成的代码
+            code_output = None
+            if isinstance(messages, list):
+                # 遍历所有消息寻找包含代码的部分
+                for msg in messages:
+                    if isinstance(msg, str):
+                        content = msg
+                    else:
+                        content = getattr(msg, 'content', '')
+                    
+                    # 检查消息内容是否包含python代码块
+                    if '```python' in content:
+                        extracted = extract_code_from_message(content)
+                        if extracted and 'def ' in extracted:  # 确保提取的内容是函数定义
+                            code_output = extracted
+                            print(f"\nFound code in message:\n{code_output}\n")
+                            break
+            
+            if not code_output:
+                raise ValueError("No code generated")
+            
+            print("\nCode extracted successfully\n")
+            # 显示当前示例的代码和评测结果
+            display_evaluation_info(ex, code_output)
+            
+            # 处理示例
+            processed_ex = process_example(ex, lang, code_output)
+            generated_examples.append(processed_ex)
+
+            # 每处理5个示例保存一次
+            if (i + 1) % 5 == 0:
+                with open(saved_path, 'a') as fw:
+                    for example in generated_examples[-5:]:
+                        fw.write(json.dumps(example) + '\n')
+                    print(f"Saved {5} processed examples to {saved_path}")
+
+        except Exception as e:
+            print(f"Error processing example {ex['task_id']}: {e}")
+
+    # 最终保存所有结果
+    with open(saved_path, 'w') as fw:
+        for ex in generated_examples:
+            fw.write(json.dumps(ex) + '\n')
+
+    return saved_path
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output_path', type=str, default='output/meta_python.jsonl')
+    parser.add_argument('--language', type=str, default='python')
+    parser.add_argument('--temp_dir', type=str, default='tmp')
+    args = parser.parse_args()
+    
+    import asyncio
+    output_file = asyncio.run(generate_main(args))
+    
+    # 保持原有评估逻辑
+    result = evaluate_functional_correctness(
+        input_file=output_file,
+        tmp_dir=args.temp_dir,
+        n_workers=8,
+        timeout=3.0,
+        problem_file=data_abs_dir / f"humaneval-{args.language}.jsonl",
+        language=args.language
     )
-
-    team.invest(investment=investment)
-    team.run_project(idea)
-    await team.run(n_round=n_round)
-
-
-if __name__ == "__main__":
-    fire.Fire(main)
+    print("\nFinal Evaluation Result:")
+    console.print(Panel(str(result), title="[bold yellow]Final Evaluation Result", border_style="yellow"))
