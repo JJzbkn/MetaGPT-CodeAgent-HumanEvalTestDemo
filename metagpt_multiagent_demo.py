@@ -119,21 +119,34 @@ class Reviewer(Role):
         self.set_actions([CodeReviewerAction])
         self._watch([TestGenerationAction])
 
-def extract_code_from_message(message):
-    pattern = r"```python\n(.+?)\n```"
-    match = re.search(pattern, message, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return message
+def extract_code_from_message(message: str) -> str:
+    # 首先找到 "### Code Generation" 的位置
+    code_gen_pos = message.find("### Code Generation")
+    if code_gen_pos == -1:
+        return ""
+    
+    # 从这个位置开始寻找第一个 Python 代码块
+    code_start = message.find("```python", code_gen_pos)
+    if code_start == -1:
+        return ""
+    
+    # 找到代码块的结束位置
+    code_end = message.find("```", code_start + 8)
+    if code_end == -1:
+        return ""
+    
+    # 提取代码内容（去掉 ```python 和 结尾的 ```）
+    # 修复提取时包含了```python中最后一个n和换行符的问题
+    code = message[code_start + 9:code_end].strip()
+    return code
 
 def process_example(example, lang, code_output):
     # 提取生成的代码
-    generated_code = extract_code_from_message(code_output)
     # 合并原始prompt和生成的代码
-    example['output'] = generated_code
+    example['output'] = code_output
     return {
         'task_id': example['task_id'],
-        'completion': example['prompt'] + '\n' + generated_code
+        'completion': example['prompt'] + '\n' + code_output
     }
 
 def display_evaluation_info(example, code_output, result=None):
@@ -141,8 +154,7 @@ def display_evaluation_info(example, code_output, result=None):
     console.print(Panel(example['prompt'], title="[bold blue]Task Requirement", border_style="blue"))
     
     # 显示生成的代码（带语法高亮）
-    generated_code = extract_code_from_message(code_output)
-    syntax = Syntax(generated_code, "python", theme="monokai", line_numbers=True)
+    syntax = Syntax(code_output, "python", theme="monokai", line_numbers=True)
     console.print(Panel(syntax, title="[bold green]Generated Code", border_style="green"))
     
     # 如果有评测结果，显示评测结果
@@ -189,31 +201,9 @@ async def generate_main(args):
             # 运行MetaGPT多轮协作流程
             team.run_project(ex['prompt'])
             messages = await team.run(n_round=3)
-            # 输出所有消息内容
-
-            # 直接打印消息内容进行调试
-            print(f"\nReceived messages type: {type(messages)}")
-            print(f"Messages content: {messages}")
             # 获取Coder生成的代码
-            code_output = None
-            if isinstance(messages, list):
-                # 遍历所有消息寻找包含代码的部分
-                for msg in messages:
-                    if isinstance(msg, str):
-                        content = msg
-                    else:
-                        content = getattr(msg, 'content', '')
-                    
-                    # 检查消息内容是否包含python代码块
-                    if '```python' in content:
-                        extracted = extract_code_from_message(content)
-                        if extracted and 'def ' in extracted:  # 确保提取的内容是函数定义
-                            code_output = extracted
-                            print(f"\nFound code in message:\n{code_output}\n")
-                            break
-            
-            if not code_output:
-                raise ValueError("No code generated")
+            code_output = extract_code_from_message(message=messages)
+            print(code_output)
             
             print("\nCode extracted successfully\n")
             # 显示当前示例的代码和评测结果
