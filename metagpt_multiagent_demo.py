@@ -120,12 +120,12 @@ class Reviewer(Role):
         self._watch([TestGenerationAction])
 
 def extract_code_from_message(message: str) -> str:
-    # 首先找到 "### Code Generation" 的位置
-    code_gen_pos = message.find("### Code Generation")
-    if code_gen_pos == -1:
-        return ""
+    # # 首先找到 "### Code Generation" 的位置
+    # code_gen_pos = message.find("### Code Generation")
+    # if code_gen_pos == -1:
+    #     return ""
     
-    # 从这个位置开始寻找第一个 Python 代码块
+    # 开始寻找第一个 Python 代码块
     code_start = message.find("```python", code_gen_pos)
     if code_start == -1:
         return ""
@@ -171,9 +171,7 @@ async def generate_main(args):
 
     examples = [json.loads(x) for x in open(problem_file) if x.strip()]
     
-    team = Team()
-    team.hire([Coder(), Tester(), Reviewer()])
-    team.invest(investment=3.0)
+    
 
     # 初始化已生成的示例列表
     generated_examples = []
@@ -198,14 +196,17 @@ async def generate_main(args):
             continue
 
         try:
+            team = Team()
+            team.hire([Coder(), Tester(), Reviewer()])
+            team.invest(investment=3.0)
             # 运行MetaGPT多轮协作流程
+            
             team.run_project(ex['prompt'])
             messages = await team.run(n_round=3)
+            print(messages)
             # 获取Coder生成的代码
             code_output = extract_code_from_message(message=messages)
-            print(code_output)
-            
-            print("\nCode extracted successfully\n")
+
             # 显示当前示例的代码和评测结果
             display_evaluation_info(ex, code_output)
             
